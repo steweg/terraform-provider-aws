@@ -15,10 +15,41 @@ import (
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/schema"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/validation"
 	"github.com/hashicorp/terraform-provider-aws/internal/conns"
+	"github.com/hashicorp/terraform-provider-aws/internal/flex"
 	tftags "github.com/hashicorp/terraform-provider-aws/internal/tags"
 	"github.com/hashicorp/terraform-provider-aws/internal/tfresource"
 	"github.com/hashicorp/terraform-provider-aws/internal/verify"
 )
+
+type CidrBlocks []interface{}
+
+func diff(newBlocks, oldBlocks CidrBlocks) CidrBlocks {
+	result := make(CidrBlocks, 0)
+
+	for _, newV := range newBlocks {
+		found := false
+		for _, oldV := range oldBlocks {
+			if oldV.(string) == newV.(string) {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			result = append(result, newV)
+		}
+	}
+
+	return result
+}
+
+func (oldBlocks CidrBlocks) Updated(newBlocks CidrBlocks) CidrBlocks {
+	return diff(newBlocks, oldBlocks)
+}
+
+func (oldBlocks CidrBlocks) Removed(newBlocks CidrBlocks) CidrBlocks {
+	return diff(oldBlocks, newBlocks)
+}
 
 func ResourceTransitGateway() *schema.Resource {
 	return &schema.Resource{
@@ -65,6 +96,14 @@ func ResourceTransitGateway() *schema.Resource {
 					ec2.AutoAcceptSharedAttachmentsValueDisable,
 					ec2.AutoAcceptSharedAttachmentsValueEnable,
 				}, false),
+			},
+			"cidr_blocks": {
+				Type:     schema.TypeList,
+				Optional: true,
+				Elem: &schema.Schema{
+					Type:         schema.TypeString,
+					ValidateFunc: validation.IsCIDRNetwork(0, 24),
+				},
 			},
 			"default_route_table_association": {
 				Type:     schema.TypeString,
@@ -136,6 +175,10 @@ func resourceTransitGatewayCreate(d *schema.ResourceData, meta interface{}) erro
 		TagSpecifications: ec2TagSpecificationsFromKeyValueTags(tags, ec2.ResourceTypeTransitGateway),
 	}
 
+	if v, ok := d.GetOk("cidr_blocks"); ok {
+		input.Options.TransitGatewayCidrBlocks = flex.ExpandStringList(v.([]interface{}))
+	}
+
 	if v, ok := d.GetOk("amazon_side_asn"); ok {
 		input.Options.AmazonSideAsn = aws.Int64(int64(v.(int)))
 	}
@@ -196,6 +239,7 @@ func resourceTransitGatewayRead(d *schema.ResourceData, meta interface{}) error 
 	d.Set("arn", transitGateway.TransitGatewayArn)
 	d.Set("association_default_route_table_id", transitGateway.Options.AssociationDefaultRouteTableId)
 	d.Set("auto_accept_shared_attachments", transitGateway.Options.AutoAcceptSharedAttachments)
+	d.Set("cidr_blocks", transitGateway.Options.TransitGatewayCidrBlocks)
 	d.Set("default_route_table_association", transitGateway.Options.DefaultRouteTableAssociation)
 	d.Set("default_route_table_propagation", transitGateway.Options.DefaultRouteTablePropagation)
 	d.Set("description", transitGateway.Description)
@@ -250,6 +294,21 @@ func resourceTransitGatewayUpdate(d *schema.ResourceData, meta interface{}) erro
 	if d.HasChange("dns_support") {
 		transitGatewayModified = true
 		options.DnsSupport = aws.String(d.Get("dns_support").(string))
+	}
+
+	if d.HasChange("cidr_blocks") {
+		transitGatewayModified = true
+		o, n := d.GetChange("cidr_blocks")
+		oldCidrBlocks := o.(CidrBlocks)
+		newCidrBlocks := n.(CidrBlocks)
+
+		if removedCidrBlocks := oldCidrBlocks.Removed(newCidrBlocks); len(removedCidrBlocks) > 0 {
+			options.RemoveTransitGatewayCidrBlocks = flex.ExpandStringList(removedCidrBlocks)
+		}
+
+		if updatedCidrBlocks := oldCidrBlocks.Updated(newCidrBlocks); len(updatedCidrBlocks) > 0 {
+			options.AddTransitGatewayCidrBlocks = flex.ExpandStringList(updatedCidrBlocks)
+		}
 	}
 
 	if d.HasChange("vpn_ecmp_support") {
@@ -537,6 +596,43 @@ func DescribeTransitGatewayRouteTableAssociation(conn *ec2.EC2, transitGatewayRo
 	return output.Associations[0], nil
 }
 
+func DescribeTransitGatewayConnect(conn *ec2.EC2, transitGatewayAttachmentID string) (*ec2.TransitGatewayConnect, error) {
+	input := &ec2.DescribeTransitGatewayConnectsInput{
+		TransitGatewayAttachmentIds: []*string{aws.String(transitGatewayAttachmentID)},
+	}
+
+	log.Printf("[DEBUG] Reading EC2 Transit Gateway Connect Attachment (%s): %s", transitGatewayAttachmentID, input)
+	for {
+		output, err := conn.DescribeTransitGatewayConnects(input)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if output == nil || len(output.TransitGatewayConnects) == 0 {
+			return nil, nil
+		}
+
+		for _, transitGatewayConnect := range output.TransitGatewayConnects {
+			if transitGatewayConnect == nil {
+				continue
+			}
+
+			if aws.StringValue(transitGatewayConnect.TransitGatewayAttachmentId) == transitGatewayAttachmentID {
+				return transitGatewayConnect, nil
+			}
+		}
+
+		if aws.StringValue(output.NextToken) == "" {
+			break
+		}
+
+		input.NextToken = output.NextToken
+	}
+
+	return nil, nil
+}
+
 func DescribeTransitGatewayVPCAttachment(conn *ec2.EC2, transitGatewayAttachmentID string) (*ec2.TransitGatewayVpcAttachment, error) {
 	input := &ec2.DescribeTransitGatewayVpcAttachmentsInput{
 		TransitGatewayAttachmentIds: []*string{aws.String(transitGatewayAttachmentID)},
@@ -561,6 +657,43 @@ func DescribeTransitGatewayVPCAttachment(conn *ec2.EC2, transitGatewayAttachment
 
 			if aws.StringValue(transitGatewayVpcAttachment.TransitGatewayAttachmentId) == transitGatewayAttachmentID {
 				return transitGatewayVpcAttachment, nil
+			}
+		}
+
+		if aws.StringValue(output.NextToken) == "" {
+			break
+		}
+
+		input.NextToken = output.NextToken
+	}
+
+	return nil, nil
+}
+
+func DescribeTransitGatewayAttachment(conn *ec2.EC2, transitGatewayAttachmentID string) (*ec2.TransitGatewayAttachment, error) {
+	input := &ec2.DescribeTransitGatewayAttachmentsInput{
+		TransitGatewayAttachmentIds: []*string{aws.String(transitGatewayAttachmentID)},
+	}
+
+	log.Printf("[DEBUG] Reading EC2 Transit Gateway Attachment (%s): %s", transitGatewayAttachmentID, input)
+	for {
+		output, err := conn.DescribeTransitGatewayAttachments(input)
+
+		if err != nil {
+			return nil, err
+		}
+
+		if output == nil || len(output.TransitGatewayAttachments) == 0 {
+			return nil, nil
+		}
+
+		for _, transitGatewayAttachment := range output.TransitGatewayAttachments {
+			if transitGatewayAttachment == nil {
+				continue
+			}
+
+			if aws.StringValue(transitGatewayAttachment.TransitGatewayAttachmentId) == transitGatewayAttachmentID {
+				return transitGatewayAttachment, nil
 			}
 		}
 
@@ -658,6 +791,11 @@ func transitGatewayRouteTableAssociationUpdate(conn *ec2.EC2, transitGatewayRout
 			return fmt.Errorf("error waiting for EC2 Transit Gateway Route Table (%s) association (%s): %s", transitGatewayRouteTableID, transitGatewayAttachmentID, err)
 		}
 	} else if !associate && transitGatewayAssociation != nil {
+		// deassociation must be done only on already associated state
+		if err := waitForTransitGatewayRouteTableAssociationCreation(conn, transitGatewayRouteTableID, transitGatewayAttachmentID); err != nil {
+			return fmt.Errorf("error waiting for EC2 Transit Gateway Route Table (%s) association before deletion (%s): %s", transitGatewayRouteTableID, transitGatewayAttachmentID, err)
+		}
+
 		input := &ec2.DisassociateTransitGatewayRouteTableInput{
 			TransitGatewayAttachmentId: aws.String(transitGatewayAttachmentID),
 			TransitGatewayRouteTableId: aws.String(transitGatewayRouteTableID),
@@ -724,9 +862,9 @@ func transitGatewayRouteTableRefreshFunc(conn *ec2.EC2, transitGatewayRouteTable
 	}
 }
 
-func transitGatewayVPCAttachmentRefreshFunc(conn *ec2.EC2, transitGatewayAttachmentID string) resource.StateRefreshFunc {
+func transitGatewayAttachmentRefreshFunc(conn *ec2.EC2, transitGatewayAttachmentID string) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
-		transitGatewayVpcAttachment, err := DescribeTransitGatewayVPCAttachment(conn, transitGatewayAttachmentID)
+		transitGatewayAttachment, err := DescribeTransitGatewayAttachment(conn, transitGatewayAttachmentID)
 
 		if tfawserr.ErrMessageContains(err, "InvalidTransitGatewayAttachmentID.NotFound", "") {
 			return nil, ec2.TransitGatewayAttachmentStateDeleted, nil
@@ -736,11 +874,11 @@ func transitGatewayVPCAttachmentRefreshFunc(conn *ec2.EC2, transitGatewayAttachm
 			return nil, "", fmt.Errorf("error reading EC2 Transit Gateway VPC Attachment (%s): %s", transitGatewayAttachmentID, err)
 		}
 
-		if transitGatewayVpcAttachment == nil {
+		if transitGatewayAttachment == nil {
 			return nil, ec2.TransitGatewayAttachmentStateDeleted, nil
 		}
 
-		return transitGatewayVpcAttachment, aws.StringValue(transitGatewayVpcAttachment.State), nil
+		return transitGatewayAttachment, aws.StringValue(transitGatewayAttachment.State), nil
 	}
 }
 
@@ -920,7 +1058,7 @@ func waitForTransitGatewayVPCAttachmentAcceptance(conn *ec2.EC2, transitGatewayA
 			ec2.TransitGatewayAttachmentStatePendingAcceptance,
 		},
 		Target:  []string{ec2.TransitGatewayAttachmentStateAvailable},
-		Refresh: transitGatewayVPCAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
+		Refresh: transitGatewayAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
 		Timeout: 10 * time.Minute,
 	}
 
@@ -930,36 +1068,36 @@ func waitForTransitGatewayVPCAttachmentAcceptance(conn *ec2.EC2, transitGatewayA
 	return err
 }
 
-func waitForTransitGatewayVPCAttachmentCreation(conn *ec2.EC2, transitGatewayAttachmentID string) error {
+func waitForTransitGatewayAttachmentCreation(conn *ec2.EC2, transitGatewayAttachmentID string) error {
 	stateConf := &resource.StateChangeConf{
 		Pending: []string{ec2.TransitGatewayAttachmentStatePending},
 		Target: []string{
 			ec2.TransitGatewayAttachmentStatePendingAcceptance,
 			ec2.TransitGatewayAttachmentStateAvailable,
 		},
-		Refresh: transitGatewayVPCAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
+		Refresh: transitGatewayAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
 		Timeout: 10 * time.Minute,
 	}
 
-	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway VPC Attachment (%s) availability", transitGatewayAttachmentID)
+	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway Attachment (%s) availability", transitGatewayAttachmentID)
 	_, err := stateConf.WaitForState()
 
 	return err
 }
 
-func WaitForTransitGatewayVPCAttachmentDeletion(conn *ec2.EC2, transitGatewayAttachmentID string) error {
+func WaitForTransitGatewayAttachmentDeletion(conn *ec2.EC2, transitGatewayAttachmentID string) error {
 	stateConf := &resource.StateChangeConf{
 		Pending: []string{
 			ec2.TransitGatewayAttachmentStateAvailable,
 			ec2.TransitGatewayAttachmentStateDeleting,
 		},
 		Target:         []string{ec2.TransitGatewayAttachmentStateDeleted},
-		Refresh:        transitGatewayVPCAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
+		Refresh:        transitGatewayAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
 		Timeout:        10 * time.Minute,
 		NotFoundChecks: 1,
 	}
 
-	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway VPC Attachment (%s) deletion", transitGatewayAttachmentID)
+	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway Attachment (%s) deletion", transitGatewayAttachmentID)
 	_, err := stateConf.WaitForState()
 
 	if tfresource.NotFound(err) {
@@ -969,15 +1107,15 @@ func WaitForTransitGatewayVPCAttachmentDeletion(conn *ec2.EC2, transitGatewayAtt
 	return err
 }
 
-func waitForTransitGatewayVPCAttachmentUpdate(conn *ec2.EC2, transitGatewayAttachmentID string) error {
+func waitForTransitGatewayAttachmentUpdate(conn *ec2.EC2, transitGatewayAttachmentID string) error {
 	stateConf := &resource.StateChangeConf{
 		Pending: []string{ec2.TransitGatewayAttachmentStateModifying},
 		Target:  []string{ec2.TransitGatewayAttachmentStateAvailable},
-		Refresh: transitGatewayVPCAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
+		Refresh: transitGatewayAttachmentRefreshFunc(conn, transitGatewayAttachmentID),
 		Timeout: 10 * time.Minute,
 	}
 
-	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway VPC Attachment (%s) availability", transitGatewayAttachmentID)
+	log.Printf("[DEBUG] Waiting for EC2 Transit Gateway Attachment (%s) availability", transitGatewayAttachmentID)
 	_, err := stateConf.WaitForState()
 
 	return err

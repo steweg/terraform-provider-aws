@@ -18,11 +18,28 @@ import (
 
 func TestAccEC2TransitGateway_serial(t *testing.T) {
 	testCases := map[string]map[string]func(t *testing.T){
+		"Connect": {
+			"basic":      testAccTransitGatewayConnect_basic,
+			"disappears": testAccTransitGatewayConnect_disappears,
+			"Tags":       testAccTransitGatewayConnect_Tags,
+			"TransitGatewayDefaultRouteTableAssociation":                       testAccTransitGatewayConnect_TransitGatewayDefaultRouteTableAssociation,
+			"TransitGatewayDefaultRouteTableAssociationAndPropagationDisabled": testAccTransitGatewayConnect_TransitGatewayDefaultRouteTableAssociationAndPropagationDisabled,
+			"TransitGatewayDefaultRouteTablePropagation":                       testAccTransitGatewayConnect_TransitGatewayDefaultRouteTablePropagation,
+		},
+		"ConnectPeer": {
+			"basic":                 testAccTransitGatewayConnectPeer_basic,
+			"disappears":            testAccTransitGatewayConnectPeer_disappears,
+			"BgpAsn":                testAccTransitGatewayConnectPeer_BgpAsn,
+			"InsiteCidrBlocks":      testAccTransitGatewayConnectPeer_InsiteCidrBlocks,
+			"Tags":                  testAccTransitGatewayConnectPeer_Tags,
+			"TransitGatewayAddress": testAccTransitGatewayConnectPeer_TransitGatewayAddress,
+		},
 		"Gateway": {
 			"basic":                       testAccTransitGateway_basic,
 			"disappears":                  testAccTransitGateway_disappears,
 			"AmazonSideASN":               testAccTransitGateway_AmazonSideASN,
 			"AutoAcceptSharedAttachments": testAccTransitGateway_AutoAcceptSharedAttachments,
+			"CidrBlocks":                  testAccTransitGateway_CidrBlocks,
 			"DefaultRouteTableAssociationAndPropagationDisabled": testAccTransitGateway_DefaultRouteTableAssociationAndPropagationDisabled,
 			"DefaultRouteTableAssociation":                       testAccTransitGateway_DefaultRouteTableAssociation,
 			"DefaultRouteTablePropagation":                       testAccTransitGateway_DefaultRouteTablePropagation,
@@ -221,6 +238,48 @@ func testAccTransitGateway_AutoAcceptSharedAttachments(t *testing.T) {
 					testAccCheckTransitGatewayExists(resourceName, &transitGateway2),
 					testAccCheckTransitGatewayNotRecreated(&transitGateway1, &transitGateway2),
 					resource.TestCheckResourceAttr(resourceName, "auto_accept_shared_attachments", ec2.AutoAcceptSharedAttachmentsValueDisable),
+				),
+			},
+		},
+	})
+}
+
+func testAccTransitGateway_CidrBlocks(t *testing.T) {
+	var transitGateway1, transitGateway2, transitGateway3 ec2.TransitGateway
+	resourceName := "aws_ec2_transit_gateway.test"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:     func() { acctest.PreCheck(t); testAccPreCheckTransitGateway(t) },
+		ErrorCheck:   acctest.ErrorCheck(t, ec2.EndpointsID),
+		Providers:    acctest.Providers,
+		CheckDestroy: testAccCheckTransitGatewayDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccTransitGatewayCidrBlocks2Config(),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTransitGatewayExists(resourceName, &transitGateway1),
+					resource.TestCheckResourceAttr(resourceName, "cidr_blocks.#", "2"),
+				),
+			},
+			{
+				ResourceName:      resourceName,
+				ImportState:       true,
+				ImportStateVerify: true,
+			},
+			{
+				Config: testAccTransitGatewayCidrBlocks1Config(),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTransitGatewayExists(resourceName, &transitGateway2),
+					testAccCheckTransitGatewayNotRecreated(&transitGateway1, &transitGateway2),
+					resource.TestCheckResourceAttr(resourceName, "cidr_blocks.#", "1"),
+				),
+			},
+			{
+				Config: testAccTransitGatewayCidrBlocks2Config(),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckTransitGatewayExists(resourceName, &transitGateway3),
+					testAccCheckTransitGatewayNotRecreated(&transitGateway2, &transitGateway3),
+					resource.TestCheckResourceAttr(resourceName, "cidr_blocks.#", "2"),
 				),
 			},
 		},
@@ -569,11 +628,11 @@ func testAccCheckTransitGatewayRecreated(i, j *ec2.TransitGateway) resource.Test
 	}
 }
 
-func testAccCheckTransitGatewayAssociationDefaultRouteTableVPCAttachmentAssociated(transitGateway *ec2.TransitGateway, transitGatewayVpcAttachment *ec2.TransitGatewayVpcAttachment) resource.TestCheckFunc {
+func testAccCheckTransitGatewayAssociationDefaultRouteTableAttachmentAssociated(transitGateway *ec2.TransitGateway, transitGatewayAttachmentId *string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		conn := acctest.Provider.Meta().(*conns.AWSClient).EC2Conn
 
-		attachmentID := aws.StringValue(transitGatewayVpcAttachment.TransitGatewayAttachmentId)
+		attachmentID := aws.StringValue(transitGatewayAttachmentId)
 		routeTableID := aws.StringValue(transitGateway.Options.AssociationDefaultRouteTableId)
 		association, err := tfec2.DescribeTransitGatewayRouteTableAssociation(conn, routeTableID, attachmentID)
 
@@ -589,11 +648,11 @@ func testAccCheckTransitGatewayAssociationDefaultRouteTableVPCAttachmentAssociat
 	}
 }
 
-func testAccCheckTransitGatewayAssociationDefaultRouteTableVPCAttachmentNotAssociated(transitGateway *ec2.TransitGateway, transitGatewayVpcAttachment *ec2.TransitGatewayVpcAttachment) resource.TestCheckFunc {
+func testAccCheckTransitGatewayAssociationDefaultRouteTableAttachmentNotAssociated(transitGateway *ec2.TransitGateway, transitGatewayAttachmentId *string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		conn := acctest.Provider.Meta().(*conns.AWSClient).EC2Conn
 
-		attachmentID := aws.StringValue(transitGatewayVpcAttachment.TransitGatewayAttachmentId)
+		attachmentID := aws.StringValue(transitGatewayAttachmentId)
 		routeTableID := aws.StringValue(transitGateway.Options.AssociationDefaultRouteTableId)
 		association, err := tfec2.DescribeTransitGatewayRouteTableAssociation(conn, routeTableID, attachmentID)
 
@@ -609,11 +668,11 @@ func testAccCheckTransitGatewayAssociationDefaultRouteTableVPCAttachmentNotAssoc
 	}
 }
 
-func testAccCheckTransitGatewayPropagationDefaultRouteTableVPCAttachmentNotPropagated(transitGateway *ec2.TransitGateway, transitGatewayVpcAttachment *ec2.TransitGatewayVpcAttachment) resource.TestCheckFunc {
+func testAccCheckTransitGatewayPropagationDefaultRouteTableAttachmentNotPropagated(transitGateway *ec2.TransitGateway, transitGatewayAttachmentId *string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		conn := acctest.Provider.Meta().(*conns.AWSClient).EC2Conn
 
-		attachmentID := aws.StringValue(transitGatewayVpcAttachment.TransitGatewayAttachmentId)
+		attachmentID := aws.StringValue(transitGatewayAttachmentId)
 		routeTableID := aws.StringValue(transitGateway.Options.AssociationDefaultRouteTableId)
 		propagation, err := tfec2.FindTransitGatewayRouteTablePropagation(conn, routeTableID, attachmentID)
 
@@ -629,11 +688,11 @@ func testAccCheckTransitGatewayPropagationDefaultRouteTableVPCAttachmentNotPropa
 	}
 }
 
-func testAccCheckTransitGatewayPropagationDefaultRouteTableVPCAttachmentPropagated(transitGateway *ec2.TransitGateway, transitGatewayVpcAttachment *ec2.TransitGatewayVpcAttachment) resource.TestCheckFunc {
+func testAccCheckTransitGatewayPropagationDefaultRouteTableAttachmentPropagated(transitGateway *ec2.TransitGateway, transitGatewayAttachmentId *string) resource.TestCheckFunc {
 	return func(s *terraform.State) error {
 		conn := acctest.Provider.Meta().(*conns.AWSClient).EC2Conn
 
-		attachmentID := aws.StringValue(transitGatewayVpcAttachment.TransitGatewayAttachmentId)
+		attachmentID := aws.StringValue(transitGatewayAttachmentId)
 		routeTableID := aws.StringValue(transitGateway.Options.AssociationDefaultRouteTableId)
 		propagation, err := tfec2.FindTransitGatewayRouteTablePropagation(conn, routeTableID, attachmentID)
 
@@ -757,4 +816,20 @@ resource "aws_ec2_transit_gateway" "test" {
   }
 }
 `, tagKey1, tagValue1, tagKey2, tagValue2)
+}
+
+func testAccTransitGatewayCidrBlocks1Config() string {
+	return fmt.Sprintf(`
+resource "aws_ec2_transit_gateway" "test" {
+  cidr_blocks = ["10.120.0.0/24"]
+}
+`)
+}
+
+func testAccTransitGatewayCidrBlocks2Config() string {
+	return fmt.Sprintf(`
+resource "aws_ec2_transit_gateway" "test" {
+  cidr_blocks = ["10.120.0.0/24", "10.121.0.0/24"]
+}
+`)
 }

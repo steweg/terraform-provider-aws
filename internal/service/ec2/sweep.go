@@ -1624,7 +1624,7 @@ func sweepTransitGatewayVPCAttachments(region string) error {
 				return fmt.Errorf("error deleting EC2 Transit Gateway VPC Attachment (%s): %s", id, err)
 			}
 
-			if err := WaitForTransitGatewayVPCAttachmentDeletion(conn, id); err != nil {
+			if err := WaitForTransitGatewayAttachmentDeletion(conn, id); err != nil {
 				return fmt.Errorf("error waiting for EC2 Transit Gateway VPC Attachment (%s) deletion: %s", id, err)
 			}
 		}
